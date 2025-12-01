@@ -1,5 +1,6 @@
 # ========================================
-# Gmail Mail Merge Tool - Modern UI Edition (Encoding Fix)
+# Gmail Mail Merge Tool - Modern UI Edition
+# (Encoding Fix + Draft Default 110 + Reply Draft Support + ETA)
 # ========================================
 import streamlit as st
 import pandas as pd
@@ -9,7 +10,7 @@ import re
 import json
 import random
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
@@ -34,7 +35,7 @@ with st.sidebar:
     st.markdown("- 🔁 New Run / Reset")
     st.markdown("- 🗂️ Merge History")
     st.markdown("---")
-    st.caption("Developed with ❤️ by Ranjith")
+    st.caption("Developed by Ranjith")
 
 # Main Header
 st.markdown("<h1 style='text-align:center;'>📧 Gmail Mail Merge Tool</h1>", unsafe_allow_html=True)
@@ -66,6 +67,56 @@ CLIENT_CONFIG = {
 # ========================================
 DONE_FILE = "/tmp/mailmerge_done.json"
 BATCH_SIZE_DEFAULT = 50
+DRAFT_BATCH_SIZE_DEFAULT = 110  # default batch for draft mode
+
+# ========================================
+# Predefined Follow-up Templates (added)
+# ========================================
+FOLLOW_UP_TEMPLATES = {
+    "Follow 1": """Hi {First Name},
+
+Hope you’ve been doing well. Would you like to get a **few sample contacts** to check our list accuracy?
+
+Please let me know your requirements.
+
+Thanks For your Time,
+**Gracie**
+Business Development Manager | Streamline Data
+""",
+
+    "Follow 2": """Hi {First Name},
+
+Have you reviewed my previous email? 
+
+Let me know your thoughts.
+
+Thanks For your Time,
+**Gracie**
+Business Development Manager | Streamline Data
+""",
+
+    "Follow 3": """  Hi {First Name},
+
+I wanted to circle back on my last message. Would you like to see a **few sample contacts** to have an idea on our database
+
+Looking forward to hearing from you.
+
+Thanks For your Time,
+**Gracie**
+Business Development Manager | Streamline Data
+""",
+
+    "Follow 4": """Hi {First Name},
+
+This is my final follow , **May be you're missed my previous Mails**  if you’d like me to send over a sample list of verified  decision-makers for your review.
+
+Looking forward to your response.
+
+Thanks For your Time,
+**Gracie**
+Business Development Manager | Streamline Data
+""",
+}
 
 # ========================================
 # Recovery Logic
@@ -209,24 +260,36 @@ if not st.session_state["sending"]:
     uploaded_file = st.file_uploader("Upload CSV or Excel file", type=["csv", "xlsx"])
 
     if uploaded_file:
-        # --- FIX: Safe CSV reading with encoding fallback ---
+        # Safe CSV reading with encoding fallback
         if uploaded_file.name.lower().endswith("csv"):
             try:
                 df = pd.read_csv(uploaded_file, encoding="utf-8")
             except UnicodeDecodeError:
-                try:
-                    uploaded_file.seek(0)
-                    df = pd.read_csv(uploaded_file, encoding="latin1")
-                except Exception:
-                    st.error("⚠️ Unable to read the uploaded CSV. Please check that it's a valid CSV file.")
-                    st.stop()
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, encoding="latin1")
         else:
             df = pd.read_excel(uploaded_file)
-        # -----------------------------------------------------
 
         for col in ["ThreadId", "RfcMessageId", "Status"]:
             if col not in df.columns:
                 df[col] = ""
+
+        # ============================================================
+        # 🔍 EMAIL SEARCH FEATURE (NO UI CHANGE / NON-DESTRUCTIVE)
+        # ============================================================
+        with st.expander("🔍 Search a specific email in your uploaded list"):
+            search_email = st.text_input("Enter email to search:", key="email_search_box")
+            if st.button("Search Email", key="email_search_button"):
+                if "Email" in df.columns:
+                    result = df[df["Email"].astype(str).str.lower() == search_email.lower()]
+                    if not result.empty:
+                        st.success("✅ Email found.")
+                        st.dataframe(result)
+                    else:
+                        st.error("❌ Email not found.")
+                else:
+                    st.error("Your file does not contain an 'Email' column.")
+        # ============================================================
 
         st.info("📌 Tip: Include 'ThreadId' and 'RfcMessageId' for follow-ups if available.")
         st.markdown("### ✏️ Edit Your Contact List")
@@ -235,19 +298,38 @@ if not st.session_state["sending"]:
         st.markdown("---")
         st.subheader("🧩 Step 2: Email Template")
 
-        subject_template = st.text_input("✉️ Subject", "Hello {Name}")
-        body_template = st.text_area(
-            "📝 Body (Markdown + Variables like {Name})",
-            """Dear {Name},
+        # --- NEW: Follow-up Template Selector ---
+        if "body_template" not in st.session_state:
+            st.session_state["body_template"] = """Hi {First Name},
 
 Welcome to **Mail Merge App** demo.
 
 Thanks,  
-**Your Company**""",
-            height=250,
+**Your Company**"""
+
+        selected_follow = st.radio(
+            "📌 Load a follow-up template (select 'Custom' to keep editor contents)",
+            ["Custom", "Follow 1", "Follow 2", "Follow 3", "Follow 4"],
+            horizontal=True
         )
 
-        label_name = st.text_input("🏷️ Gmail label", "Mail Merge Sent")
+        if selected_follow != "Custom":
+            st.session_state["body_template"] = FOLLOW_UP_TEMPLATES.get(selected_follow, st.session_state["body_template"])
+
+        subject_template = st.text_input("✉️ Subject", "{Company Name}")
+        body_template = st.text_area(
+            "📝 Body (Markdown + Variables like {Name})",
+            st.session_state.get("body_template", """Hi {First Name},
+
+Welcome to **Mail Merge App** demo.
+
+Thanks,  
+**Your Company**"""),
+            height=250,
+        )
+        st.session_state["body_template"] = body_template
+
+        label_name = st.text_input("🏷️ Gmail label", "enter a label name")
         delay = st.slider("⏱️ Delay between emails (seconds)", 20, 75, 20)
         send_mode = st.radio("📬 Choose send mode", ["🆕 New Email", "↩️ Follow-up (Reply)", "💾 Save as Draft"])
 
@@ -267,9 +349,8 @@ Thanks,
             st.markdown(preview_body, unsafe_allow_html=True)
 
         if st.button("🚀 Start Mail Merge"):
-            df = df.reset_index(drop=True)
-            df = df.fillna("")
-            pending_indices = df.index[df["Status"] != "Sent"].tolist()
+            df = df.reset_index(drop=True).fillna("")
+            pending_indices = df.index[~df["Status"].isin(["Sent", "Draft"])].tolist()
 
             st.session_state.update({
                 "sending": True,
@@ -279,12 +360,13 @@ Thanks,
                 "body_template": body_template,
                 "label_name": label_name,
                 "delay": delay,
-                "send_mode": send_mode
+                "send_mode": send_mode,
+                "start_time": time.time()
             })
             st.rerun()
 
 # ========================================
-# Sending Mode with Progress
+# Sending Mode with Progress + ETA
 # ========================================
 if st.session_state["sending"]:
     df = st.session_state["df"]
@@ -294,10 +376,11 @@ if st.session_state["sending"]:
     label_name = st.session_state["label_name"]
     delay = st.session_state["delay"]
     send_mode = st.session_state["send_mode"]
+    start_time = st.session_state.get("start_time", time.time())
 
     st.subheader("📨 Sending Emails...")
     progress = st.progress(0)
-    status_box = st.empty()
+    eta_text = st.empty()
 
     label_id = None
     if send_mode == "🆕 New Email":
@@ -309,12 +392,24 @@ if st.session_state["sending"]:
     sent_message_ids = []
 
     for i, idx in enumerate(pending_indices):
-        if send_mode != "💾 Save as Draft" and batch_count >= BATCH_SIZE_DEFAULT:
+        batch_limit = DRAFT_BATCH_SIZE_DEFAULT if send_mode == "💾 Save as Draft" else BATCH_SIZE_DEFAULT
+        if batch_count >= batch_limit:
             break
+
         row = df.loc[idx]
 
         pct = int(((i + 1) / total) * 100)
         progress.progress(min(max(pct, 0), 100))
+
+        # --- ETA calculation ---
+        elapsed = time.time() - start_time
+        avg_per_email = elapsed / (i + 1) if i + 1 > 0 else 0
+        remaining = total - (i + 1)
+        est_seconds = int(avg_per_email * remaining)
+        eta_str = str(timedelta(seconds=est_seconds))
+        eta_text.info(f"⏳ Est. Time Remaining: {eta_str} ({i + 1}/{total})")
+
+        status_box = st.empty()
         status_box.info(f"📩 Processing {i + 1}/{total}")
 
         to_addr = extract_email(str(row.get("Email", "")).strip())
@@ -331,17 +426,13 @@ if st.session_state["sending"]:
             message["Subject"] = subject
 
             msg_body = {}
-            if send_mode == "↩️ Follow-up (Reply)":
-                thread_id = str(row.get("ThreadId", "")).strip()
-                rfc_id = str(row.get("RfcMessageId", "")).strip()
-                if thread_id and rfc_id:
-                    message["In-Reply-To"] = rfc_id
-                    message["References"] = rfc_id
-                    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-                    msg_body = {"raw": raw, "threadId": thread_id}
-                else:
-                    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-                    msg_body = {"raw": raw}
+            thread_id = str(row.get("ThreadId", "")).strip()
+            rfc_id = str(row.get("RfcMessageId", "")).strip()
+            if thread_id and rfc_id:
+                message["In-Reply-To"] = rfc_id
+                message["References"] = rfc_id
+                raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+                msg_body = {"raw": raw, "threadId": thread_id}
             else:
                 raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
                 msg_body = {"raw": raw}
@@ -367,28 +458,30 @@ if st.session_state["sending"]:
             st.error(f"❌ Error for {to_addr}: {e}")
 
     # Label + Backup
-    if send_mode != "💾 Save as Draft":
-        if sent_message_ids and label_id:
-            try:
-                service.users().messages().batchModify(
-                    userId="me",
-                    body={"ids": sent_message_ids, "addLabelIds": [label_id]}
-                ).execute()
-            except Exception as e:
-                st.warning(f"⚠️ Labeling failed: {e}")
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_label = re.sub(r'[^A-Za-z0-9_-]', '_', label_name)
-        file_name = f"Updated_{safe_label}_{timestamp}.csv"
-        file_path = os.path.join("/tmp", file_name)
-        df.to_csv(file_path, index=False)
+    if send_mode != "💾 Save as Draft" and sent_message_ids and label_id:
         try:
-            send_email_backup(service, file_path)
+            service.users().messages().batchModify(
+                userId="me",
+                body={"ids": sent_message_ids, "addLabelIds": [label_id]}
+            ).execute()
         except Exception as e:
-            st.warning(f"⚠️ Backup email failed: {e}")
+            st.warning(f"⚠️ Labeling failed: {e}")
 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_label = re.sub(r'[^A-Za-z0-9_-]', '_', label_name)
+    file_name = f"Updated_{safe_label}_{timestamp}.csv"
+    file_path = os.path.join("/tmp", file_name)
+    df.to_csv(file_path, index=False)
+    try:
+        send_email_backup(service, file_path)
+    except Exception as e:
+        st.warning(f"⚠️ Backup email failed: {e}")
+
+    try:
         with open(DONE_FILE, "w") as f:
             json.dump({"done_time": str(datetime.now()), "file": file_path}, f)
+    except Exception:
+        pass
 
     st.session_state["sending"] = False
     st.session_state["done"] = True
